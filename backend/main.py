@@ -52,7 +52,7 @@ class ExportRequest(BaseModel):
     entities: list
 
 
-def parse_gemini_json(raw: str) -> dict:
+def parse_json(raw: str) -> dict:
     raw = raw.strip()
     if "```" in raw:
         parts = raw.split("```")
@@ -70,7 +70,7 @@ def parse_gemini_json(raw: str) -> dict:
         match = re.search(r"\{.*\}", raw, re.DOTALL)
         if match:
             return json.loads(match.group())
-    raise ValueError(f"Cannot parse JSON from Gemini response: {raw[:200]}")
+    raise ValueError(f"Cannot parse JSON from LLM response: {raw[:200]}")
 
 
 def build_prompt(text: str, feedback: str = None) -> str:
@@ -122,7 +122,7 @@ async def label_text(req: LabelRequest):
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
         )
-        result = parse_gemini_json(response.choices[0].message.content)
+        result = parse_json(response.choices[0].message.content)
         entities = result.get("entities", [])
         # Verify positions match text
         verified = []
@@ -145,7 +145,7 @@ async def relabel_text(req: RelabelRequest):
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
         )
-        result = parse_gemini_json(response.choices[0].message.content)
+        result = parse_json(response.choices[0].message.content)
         entities = result.get("entities", [])
         verified = []
         for e in entities:
