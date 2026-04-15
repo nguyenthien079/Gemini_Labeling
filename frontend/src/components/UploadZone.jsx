@@ -1,6 +1,6 @@
 import { useState, useRef } from 'react'
 
-export default function UploadZone({ onSubmit, loading }) {
+export default function UploadZone({ onSubmit, loading, onBatch }) {
   const [text, setText] = useState('')
   const [filename, setFilename] = useState('document')
   const [dragging, setDragging] = useState(false)
@@ -27,8 +27,11 @@ export default function UploadZone({ onSubmit, loading }) {
 
   return (
     <div style={styles.wrap}>
-      <h1 style={styles.title}>Medical NER Labeler</h1>
-      <p style={styles.sub}>Upload file hoặc paste văn bản y tế tiếng Việt — Gemini sẽ gán nhãn tự động</p>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+        <h1 style={styles.title}>Medical NER Labeler</h1>
+        <button style={styles.batchBtn} onClick={onBatch}>Batch Mode →</button>
+      </div>
+      <p style={styles.sub}>Upload file hoặc paste văn bản y tế tiếng Việt — AI sẽ gán nhãn tự động</p>
 
       <div
         style={{ ...styles.dropzone, ...(dragging ? styles.dropzoneActive : {}) }}
@@ -111,4 +114,8 @@ const styles = {
     fontSize: 14, fontWeight: 600, transition: 'background .2s',
   },
   btnDisabled: { background: '#3a3f5c', color: '#64748b', cursor: 'not-allowed' },
+  batchBtn: {
+    background: 'transparent', border: '1px solid #6366f1', color: '#6366f1',
+    borderRadius: 8, padding: '7px 16px', fontSize: 13, cursor: 'pointer', fontWeight: 600,
+  },
 }

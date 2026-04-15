@@ -2,10 +2,11 @@ import { useState } from 'react'
 import UploadZone from './components/UploadZone'
 import LabelViewer from './components/LabelViewer'
 import ChatPanel from './components/ChatPanel'
+import BatchPanel from './components/BatchPanel'
 import { labelText, relabelText, exportData } from './services/api'
 
 export default function App() {
-  const [view, setView] = useState('upload')  // 'upload' | 'label'
+  const [view, setView] = useState('upload')  // 'upload' | 'label' | 'batch'
   const [text, setText] = useState('')
   const [filename, setFilename] = useState('document')
   const [entities, setEntities] = useState([])
@@ -60,10 +61,18 @@ export default function App() {
     setExportMsg(null)
   }
 
+  if (view === 'batch') {
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+        <BatchPanel onBack={() => setView('upload')} />
+      </div>
+    )
+  }
+
   if (view === 'upload') {
     return (
       <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
-        <UploadZone onSubmit={handleUploadSubmit} loading={loading} />
+        <UploadZone onSubmit={handleUploadSubmit} loading={loading} onBatch={() => setView('batch')} />
       </div>
     )
   }
