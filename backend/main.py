@@ -73,15 +73,18 @@ def parse_json(raw: str) -> dict:
     raise ValueError(f"Cannot parse JSON from LLM response: {raw[:200]}")
 
 
+CHUNK_SIZE = 800  # ký tự mỗi chunk
+
+
 def build_prompt(text: str, feedback: str = None) -> str:
-    prompt = f"""Bạn là chuyên gia NER y tế tiếng Việt. Hãy xác định tất cả thực thể y tế trong văn bản.
+    prompt = f"""Bạn là chuyên gia NER y tế tiếng Việt. Hãy xác định tất cả thực thể y tế trong đoạn văn bản sau.
 
 Các loại thực thể:
-- DISEASE: tên bệnh (COVID-19, ung thư, tiểu đường...)
-- SYMPTOM: triệu chứng (sốt, ho, đau đầu, mệt mỏi...)
+- DISEASE: tên bệnh (Alzheimer, COVID-19, ung thư, tiểu đường...)
+- SYMPTOM: triệu chứng (sốt, ho, đau đầu, mất trí nhớ...)
 - MEDICATION: thuốc (Paracetamol, Aspirin, kháng sinh...)
 - TREATMENT: phương pháp điều trị (phẫu thuật, hóa trị, xạ trị...)
-- BODY_PART: bộ phận cơ thể (phổi, gan, tim, não...)
+- BODY_PART: bộ phận cơ thể (phổi, gan, tim, não, tế bào thần kinh...)
 - TEST: xét nghiệm/chẩn đoán (X-quang, MRI, xét nghiệm máu...)
 - VALUE: chỉ số y khoa (39°C, 120/80 mmHg, 5mg...)
 - DOCTOR: tên bác sĩ
@@ -93,19 +96,72 @@ Văn bản:
 {text}
 """
     if feedback:
-        prompt += f"\nLưu ý từ người dùng: {feedback}\n"
+        prompt += f"\nLưu ý bổ sung: {feedback}\n"
 
     prompt += """
-Trả về JSON (chỉ JSON, không giải thích thêm):
-{
-  "entities": [
-    {"text": "tên thực thể", "label": "DISEASE", "start": 0, "end": 10}
-  ]
-}
+Chỉ trả về JSON, không giải thích:
+{"entities": [{"text": "tên thực thể nguyên văn trong đoạn", "label": "DISEASE"}]}
 
-Quan trọng: start và end là vị trí ký tự (index) trong văn bản gốc.
+Quan trọng:
+- "text" phải là chuỗi xuất hiện NGUYÊN VĂN trong đoạn văn bản trên
+- Không tự ý thêm hay bớt ký tự
+- Không trả về start/end, chỉ cần text và label
 """
     return prompt
+
+
+def resolve_positions(full_text: str, entities: list) -> list:
+    """Tìm vị trí thực của entity trong text bằng string matching."""
+    result = []
+    used_ranges = []
+
+    for e in entities:
+        entity_text = e.get("text", "").strip()
+        label = e.get("label", "")
+        if not entity_text or not label:
+            continue
+
+        # Tìm tất cả vị trí xuất hiện, chọn cái chưa bị dùng
+        start = 0
+        while True:
+            pos = full_text.find(entity_text, start)
+            if pos == -1:
+                break
+            end = pos + len(entity_text)
+            # Kiểm tra overlap với entities đã có
+            overlap = any(not (end <= r[0] or pos >= r[1]) for r in used_ranges)
+            if not overlap:
+                used_ranges.append((pos, end))
+                result.append({"text": entity_text, "label": label, "start": pos, "end": end})
+                break
+            start = pos + 1
+
+    return sorted(result, key=lambda x: x["start"])
+
+
+def chunk_text(text: str, size: int = CHUNK_SIZE) -> list[tuple[str, int]]:
+    """Chia text thành các đoạn, trả về (chunk, offset)."""
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = min(start + size, len(text))
+        # Cắt tại dấu xuống dòng gần nhất để không cắt giữa câu
+        if end < len(text):
+            newline = text.rfind('\n', start, end)
+            if newline > start:
+                end = newline + 1
+        chunks.append((text[start:end], start))
+        start = end
+    return chunks
+
+
+def call_groq(prompt: str) -> dict:
+    response = groq_client.chat.completions.create(
+        model=GROQ_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+    )
+    return parse_json(response.choices[0].message.content)
 
 
 @app.get("/api/entity-types")
@@ -116,22 +172,21 @@ async def get_entity_types():
 @app.post("/api/label")
 async def label_text(req: LabelRequest):
     try:
-        prompt = build_prompt(req.text)
-        response = groq_client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-        )
-        result = parse_json(response.choices[0].message.content)
-        entities = result.get("entities", [])
-        # Verify positions match text
-        verified = []
-        for e in entities:
-            s, end = e.get("start", 0), e.get("end", 0)
-            if 0 <= s < end <= len(req.text):
-                e["text"] = req.text[s:end]
-                verified.append(e)
-        return {"entities": verified, "filename": req.filename}
+        chunks = chunk_text(req.text)
+        all_entities = []
+
+        for chunk, offset in chunks:
+            prompt = build_prompt(chunk)
+            result = call_groq(prompt)
+            raw_entities = result.get("entities", [])
+            # Resolve positions trong chunk rồi cộng offset
+            positioned = resolve_positions(chunk, raw_entities)
+            for e in positioned:
+                e["start"] += offset
+                e["end"] += offset
+            all_entities.extend(positioned)
+
+        return {"entities": all_entities, "filename": req.filename}
     except Exception as ex:
         raise HTTPException(status_code=500, detail=str(ex))
 
@@ -139,21 +194,20 @@ async def label_text(req: LabelRequest):
 @app.post("/api/relabel")
 async def relabel_text(req: RelabelRequest):
     try:
-        prompt = build_prompt(req.text, req.feedback)
-        response = groq_client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-        )
-        result = parse_json(response.choices[0].message.content)
-        entities = result.get("entities", [])
-        verified = []
-        for e in entities:
-            s, end = e.get("start", 0), e.get("end", 0)
-            if 0 <= s < end <= len(req.text):
-                e["text"] = req.text[s:end]
-                verified.append(e)
-        return {"entities": verified, "filename": req.filename}
+        chunks = chunk_text(req.text)
+        all_entities = []
+
+        for chunk, offset in chunks:
+            prompt = build_prompt(chunk, req.feedback)
+            result = call_groq(prompt)
+            raw_entities = result.get("entities", [])
+            positioned = resolve_positions(chunk, raw_entities)
+            for e in positioned:
+                e["start"] += offset
+                e["end"] += offset
+            all_entities.extend(positioned)
+
+        return {"entities": all_entities, "filename": req.filename}
     except Exception as ex:
         raise HTTPException(status_code=500, detail=str(ex))
 
