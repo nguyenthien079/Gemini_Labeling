@@ -74,7 +74,7 @@ export default function UploadZone({ onSubmit, loading }) {
           onClick={handleSubmit}
           disabled={loading || !text.trim()}
         >
-          {loading ? 'Đang gán nhãn...' : 'Gán nhãn với Gemini'}
+          {loading ? 'Đang gán nhãn...' : 'Gán nhãn với AI'}
         </button>
       </div>
     </div>
