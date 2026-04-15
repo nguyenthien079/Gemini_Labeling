@@ -1,0 +1,16 @@
+# Python
+backend/venv/
+backend/__pycache__/
+backend/*.pyc
+backend/.env
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Data outputs (không commit labeled data vào repo)
+data/
+
+# OS
+.DS_Store
+Thumbs.db
