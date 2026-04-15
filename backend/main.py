@@ -8,7 +8,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import google.generativeai as genai
+from groq import Groq
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -22,10 +22,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
-genai.configure(api_key=GEMINI_API_KEY)
-gemini = genai.GenerativeModel(GEMINI_MODEL)
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+groq_client = Groq(api_key=os.getenv("GROQ_API_KEY", ""))
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
@@ -119,8 +117,12 @@ async def get_entity_types():
 async def label_text(req: LabelRequest):
     try:
         prompt = build_prompt(req.text)
-        response = gemini.generate_content(prompt)
-        result = parse_gemini_json(response.text)
+        response = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+        )
+        result = parse_gemini_json(response.choices[0].message.content)
         entities = result.get("entities", [])
         # Verify positions match text
         verified = []
@@ -138,8 +140,12 @@ async def label_text(req: LabelRequest):
 async def relabel_text(req: RelabelRequest):
     try:
         prompt = build_prompt(req.text, req.feedback)
-        response = gemini.generate_content(prompt)
-        result = parse_gemini_json(response.text)
+        response = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+        )
+        result = parse_gemini_json(response.choices[0].message.content)
         entities = result.get("entities", [])
         verified = []
         for e in entities:
