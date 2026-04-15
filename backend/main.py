@@ -73,39 +73,41 @@ def parse_json(raw: str) -> dict:
     raise ValueError(f"Cannot parse JSON from LLM response: {raw[:200]}")
 
 
-CHUNK_SIZE = 800  # ký tự mỗi chunk
+CHUNK_SIZE = 400   # nhỏ hơn để model tập trung hơn
+OVERLAP     = 80   # overlap giữa các chunk để không bỏ entity ở ranh giới
 
 
 def build_prompt(text: str, feedback: str = None) -> str:
-    prompt = f"""Bạn là chuyên gia NER y tế tiếng Việt. Hãy xác định tất cả thực thể y tế trong đoạn văn bản sau.
+    prompt = f"""Bạn là chuyên gia NER y tế tiếng Việt. Nhiệm vụ: liệt kê TẤT CẢ thực thể y tế xuất hiện trong đoạn văn sau — đừng bỏ sót bất kỳ từ nào có liên quan đến y tế.
 
-Các loại thực thể:
-- DISEASE: tên bệnh (Alzheimer, COVID-19, ung thư, tiểu đường...)
-- SYMPTOM: triệu chứng (sốt, ho, đau đầu, mất trí nhớ...)
-- MEDICATION: thuốc (Paracetamol, Aspirin, kháng sinh...)
-- TREATMENT: phương pháp điều trị (phẫu thuật, hóa trị, xạ trị...)
-- BODY_PART: bộ phận cơ thể (phổi, gan, tim, não, tế bào thần kinh...)
-- TEST: xét nghiệm/chẩn đoán (X-quang, MRI, xét nghiệm máu...)
+Loại thực thể cần tìm:
+- DISEASE: tên bệnh (Alzheimer, COVID-19, ung thư, tiểu đường, sa sút trí tuệ...)
+- SYMPTOM: triệu chứng, biểu hiện (mất trí nhớ, đau đầu, bối rối, lo lắng, không thể đi lại...)
+- MEDICATION: thuốc, dược phẩm (Paracetamol, Aspirin...)
+- TREATMENT: phương pháp điều trị (phẫu thuật, hóa trị, xạ trị, chăm sóc...)
+- BODY_PART: bộ phận cơ thể (não, phổi, gan, tim, tế bào thần kinh...)
+- TEST: xét nghiệm, chẩn đoán (X-quang, MRI, xét nghiệm máu...)
 - VALUE: chỉ số y khoa (39°C, 120/80 mmHg, 5mg...)
 - DOCTOR: tên bác sĩ
-- PATIENT: thông tin bệnh nhân
-- LOCATION: địa điểm (bệnh viện, thành phố...)
-- DATE: ngày tháng
+- PATIENT: bệnh nhân, người bệnh
+- LOCATION: địa điểm khám chữa bệnh
+- DATE: ngày tháng, thời điểm
 
-Văn bản:
+Đoạn văn bản:
+---
 {text}
+---
 """
     if feedback:
-        prompt += f"\nLưu ý bổ sung: {feedback}\n"
+        prompt += f"\nLưu ý bổ sung từ người dùng: {feedback}\n"
 
     prompt += """
-Chỉ trả về JSON, không giải thích:
-{"entities": [{"text": "tên thực thể nguyên văn trong đoạn", "label": "DISEASE"}]}
+Yêu cầu:
+1. Đọc từng câu, tìm TẤT CẢ thực thể y tế — không bỏ sót
+2. "text" phải là chuỗi NGUYÊN VĂN xuất hiện trong đoạn trên, không thêm/bớt ký tự
+3. Chỉ trả về JSON, không giải thích
 
-Quan trọng:
-- "text" phải là chuỗi xuất hiện NGUYÊN VĂN trong đoạn văn bản trên
-- Không tự ý thêm hay bớt ký tự
-- Không trả về start/end, chỉ cần text và label
+{"entities": [{"text": "chuỗi nguyên văn", "label": "DISEASE"}]}
 """
     return prompt
 
@@ -139,19 +141,24 @@ def resolve_positions(full_text: str, entities: list) -> list:
     return sorted(result, key=lambda x: x["start"])
 
 
-def chunk_text(text: str, size: int = CHUNK_SIZE) -> list[tuple[str, int]]:
-    """Chia text thành các đoạn, trả về (chunk, offset)."""
+def chunk_text(text: str, size: int = CHUNK_SIZE, overlap: int = OVERLAP) -> list[tuple[str, int]]:
+    """Chia text thành các đoạn có overlap, trả về (chunk, offset)."""
     chunks = []
     start = 0
     while start < len(text):
         end = min(start + size, len(text))
-        # Cắt tại dấu xuống dòng gần nhất để không cắt giữa câu
+        # Cắt tại dấu chấm/xuống dòng gần nhất để không cắt giữa câu
         if end < len(text):
-            newline = text.rfind('\n', start, end)
-            if newline > start:
-                end = newline + 1
+            for sep in ('\n', '.', ' '):
+                pos = text.rfind(sep, start + size // 2, end)
+                if pos > start:
+                    end = pos + 1
+                    break
         chunks.append((text[start:end], start))
-        start = end
+        if end >= len(text):
+            break
+        # Lùi lại overlap để không bỏ entity ở ranh giới
+        start = max(start + 1, end - overlap)
     return chunks
 
 
@@ -169,24 +176,38 @@ async def get_entity_types():
     return ENTITY_TYPES
 
 
+def dedup_entities(entities: list) -> list:
+    """Loại bỏ entity trùng lặp do overlap chunk (giữ lại theo start position)."""
+    seen = set()
+    result = []
+    for e in sorted(entities, key=lambda x: x["start"]):
+        key = (e["start"], e["end"])
+        if key not in seen:
+            seen.add(key)
+            result.append(e)
+    return result
+
+
+async def run_ner(text: str, feedback: str = None) -> list:
+    chunks = chunk_text(text)
+    all_entities = []
+    for chunk, offset in chunks:
+        prompt = build_prompt(chunk, feedback)
+        result = call_groq(prompt)
+        raw = result.get("entities", [])
+        positioned = resolve_positions(chunk, raw)
+        for e in positioned:
+            e["start"] += offset
+            e["end"] += offset
+        all_entities.extend(positioned)
+    return dedup_entities(all_entities)
+
+
 @app.post("/api/label")
 async def label_text(req: LabelRequest):
     try:
-        chunks = chunk_text(req.text)
-        all_entities = []
-
-        for chunk, offset in chunks:
-            prompt = build_prompt(chunk)
-            result = call_groq(prompt)
-            raw_entities = result.get("entities", [])
-            # Resolve positions trong chunk rồi cộng offset
-            positioned = resolve_positions(chunk, raw_entities)
-            for e in positioned:
-                e["start"] += offset
-                e["end"] += offset
-            all_entities.extend(positioned)
-
-        return {"entities": all_entities, "filename": req.filename}
+        entities = await run_ner(req.text)
+        return {"entities": entities, "filename": req.filename}
     except Exception as ex:
         raise HTTPException(status_code=500, detail=str(ex))
 
@@ -194,20 +215,8 @@ async def label_text(req: LabelRequest):
 @app.post("/api/relabel")
 async def relabel_text(req: RelabelRequest):
     try:
-        chunks = chunk_text(req.text)
-        all_entities = []
-
-        for chunk, offset in chunks:
-            prompt = build_prompt(chunk, req.feedback)
-            result = call_groq(prompt)
-            raw_entities = result.get("entities", [])
-            positioned = resolve_positions(chunk, raw_entities)
-            for e in positioned:
-                e["start"] += offset
-                e["end"] += offset
-            all_entities.extend(positioned)
-
-        return {"entities": all_entities, "filename": req.filename}
+        entities = await run_ner(req.text, req.feedback)
+        return {"entities": entities, "filename": req.filename}
     except Exception as ex:
         raise HTTPException(status_code=500, detail=str(ex))
 
