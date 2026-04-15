@@ -112,8 +112,30 @@ Yêu cầu:
     return prompt
 
 
+def find_in_text(full_text: str, query: str, used_ranges: list) -> tuple[int, int] | None:
+    """Tìm query trong full_text, bỏ qua vùng đã dùng. Thử exact rồi fuzzy."""
+    candidates = [query]
+    # Thử bỏ khoảng trắng đầu/cuối thừa, chuẩn hóa space
+    normalized = " ".join(query.split())
+    if normalized != query:
+        candidates.append(normalized)
+
+    for q in candidates:
+        start = 0
+        while True:
+            pos = full_text.find(q, start)
+            if pos == -1:
+                break
+            end = pos + len(q)
+            overlap = any(not (end <= r[0] or pos >= r[1]) for r in used_ranges)
+            if not overlap:
+                return pos, end
+            start = pos + 1
+    return None
+
+
 def resolve_positions(full_text: str, entities: list) -> list:
-    """Tìm vị trí thực của entity trong text bằng string matching."""
+    """Tìm vị trí thực của từng entity trong text."""
     result = []
     used_ranges = []
 
@@ -123,20 +145,12 @@ def resolve_positions(full_text: str, entities: list) -> list:
         if not entity_text or not label:
             continue
 
-        # Tìm tất cả vị trí xuất hiện, chọn cái chưa bị dùng
-        start = 0
-        while True:
-            pos = full_text.find(entity_text, start)
-            if pos == -1:
-                break
-            end = pos + len(entity_text)
-            # Kiểm tra overlap với entities đã có
-            overlap = any(not (end <= r[0] or pos >= r[1]) for r in used_ranges)
-            if not overlap:
-                used_ranges.append((pos, end))
-                result.append({"text": entity_text, "label": label, "start": pos, "end": end})
-                break
-            start = pos + 1
+        found = find_in_text(full_text, entity_text, used_ranges)
+        if found:
+            pos, end = found
+            used_ranges.append((pos, end))
+            actual_text = full_text[pos:end]
+            result.append({"text": actual_text, "label": label, "start": pos, "end": end})
 
     return sorted(result, key=lambda x: x["start"])
 
